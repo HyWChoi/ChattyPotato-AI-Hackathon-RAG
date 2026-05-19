@@ -117,3 +117,186 @@
 | 🟨 **Retrieved Context (Docs)** | 검색된 문서 요약/근거 제공 | **900–1200** | 45–50% | 문서당 512tokens 요약 × 2~3개. 정보 밀도 유지. |
 | 🟥 **Instruction / Output Format** | JSON 응답 지시 or 스타일 지정 | **150–250** | 10% | 모델 출력을 구조화하기 위한 명시. |
 | ⚪ **총합 (입력)** |  | **1800–2200 tokens** | 100% | 8k 모델 대비 25–30% 사용 → 안정 + 빠름 |
+
+---
+
+## 🏗️ 프로젝트 논리 아키텍처
+
+```
+                              사용자
+                                │
+                                ▼
+                    aiRouter (Client-side)
+                                │  route_client_hint / budgets
+                                ▼
+        ┌────────────────────────────────────────────────┐
+        │            Pipeline Orchestrator               │
+        │        /v1/answer  →  AnswerController         │
+        │                  AnswerPipeline                │
+        └────────────────────────────────────────────────┘
+                                │  Chains 표준 I/O
+        ┌───────────────┬───────┴────────┬───────────────┐
+        ▼               ▼                ▼               ▼
+  RewriteChain    RetrievalChain    ContextChain   GenerateChain
+  rewritten,     Embedding +       citations,     모델선택 + JSON
+  confidence,    Internal/Web      contextText    응답
+  route_hint     Retrieval
+                      │
+        ┌─────────────┼──────────────┬─────────────┐
+        ▼             ▼              ▼             ▼
+  ScoreMerger  WebSearchRetriever BM25Retriever VectorStoreRetriever
+                      │              │             │
+                Web Search API  Keyword/BM25   Vector Store / KB
+                                   Index
+
+  Cross-Cutting
+  ├─ Callback / Tracing Hooks
+  ├─ Conversation / Vector Memory
+  ├─ PromptTemplates 리소스
+  ├─ Redis / Session & Prompt Cache
+  └─ EsLoggingService → ElasticSearch Logs
+```
+
+- **Client-side aiRouter**: `route_client_hint`, 비용 budgets를 서버로 전달해 모델 결정에 힌트 제공
+- **AnswerPipeline**: 네 개 체인을 표준 I/O로 묶는 Orchestrator. 각 체인은 DTO 입력 → DTO 출력 계약을 따름
+- **Cross-Cutting**: 콜백/트레이싱, 메모리, 프롬프트 템플릿, Redis 캐시, ES 로깅이 모든 단계에 횡단 적용
+
+---
+
+## 📁 Spring 프로젝트 구조
+
+```
+src
+├── main
+│   ├── java/ia_x_ai_hackathon/chatty_potato
+│   │   ├── ChattyPotatoApplication.java
+│   │   ├── auth
+│   │   │   └── controller/AuthController.java
+│   │   ├── chatroom
+│   │   │   ├── controller/ChatController.java
+│   │   │   ├── document/ChatMessage.java
+│   │   │   ├── dto/ChatRequest.java
+│   │   │   ├── repository/ChatMessageRepository.java
+│   │   │   └── service/ChatService.java
+│   │   ├── common
+│   │   │   ├── config/SecurityConfig.java
+│   │   │   ├── exception/GlobalExceptionHandler.java
+│   │   │   ├── filter/JwtAuthenticationFilter.java
+│   │   │   ├── resolver/{UserArgumentResolver, UserId}.java
+│   │   │   └── util/{FuturePoller, JwtUtil}.java
+│   │   ├── config
+│   │   │   ├── AsyncConfig.java
+│   │   │   ├── ChatClientConfig.java
+│   │   │   ├── ElasticsearchConfig.java
+│   │   │   └── OpenAIEmbeddingConfig.java
+│   │   └── rag
+│   │       ├── controller/RAGController.java
+│   │       ├── dto
+│   │       │   ├── AugmentedContextDto.java
+│   │       │   ├── EmbeddingResultDto.java
+│   │       │   ├── LLMResponseDto.java
+│   │       │   ├── PromptAssemblyDto.java
+│   │       │   ├── RagResultDto.java
+│   │       │   ├── RetrievedDocumentDto.java
+│   │       │   ├── RewriteReqDto.java
+│   │       │   ├── RewriteResDto.java
+│   │       │   ├── RewriteResultDto.java
+│   │       │   └── RouteReqDto.java
+│   │       ├── entity/DocumentEntity.java
+│   │       ├── exception
+│   │       │   ├── PromptBuildFailedException.java
+│   │       │   ├── PromptTimeoutException.java
+│   │       │   ├── TaskNotFoundException.java
+│   │       │   └── TimeoutException.java
+│   │       ├── pipe
+│   │       │   ├── RagPipelineService.java
+│   │       │   └── chain
+│   │       │       ├── AugmentedChainService.java
+│   │       │       ├── GeneratorChainService.java
+│   │       │       ├── RetrieverChainService.java
+│   │       │       └── RewriteChainService.java
+│   │       ├── repository/DocumentRepository.java
+│   │       ├── service
+│   │       │   ├── EmbeddingService.java
+│   │       │   ├── SummarizationService.java
+│   │       │   ├── TokenAllocationStrategy.java
+│   │       │   ├── TokenCounter.java
+│   │       │   └── VectorStoreService.java
+│   │       └── store/InMemoryStore.java
+│   └── resources/application.yml
+└── test/java/ia_x_ai_hackathon/chatty_potato
+    ├── ChattyPotatoApplicationTests.java
+    └── rag
+        ├── pipe/chain
+        │   ├── AugmentedChainServiceTest.java
+        │   ├── EmbeddingServiceTest.java
+        │   ├── RagPipelineServiceTest.java
+        │   ├── RetrieverChainServiceTest.java
+        │   └── RewriteChainServiceTest.java
+        └── service
+            ├── SummarizationServiceTest.java
+            ├── TokenAllocationStrategyTest.java
+            └── TokenCounterTest.java
+```
+
+---
+
+## 📌 RAG + AI Router 해커톤 회고
+
+> *“기술 실험으로서의 성공, 완성도로서의 실패 — 그러나 학습으로서의 진짜 성장.”*
+
+### 1️⃣ 프로젝트 개요
+
+**🎯 목표**
+- 검색증강생성(RAG) 구조로 질문을 재작성·검색·요약·응답하는 파이프라인 구현
+- 비용 효율적 LLM 선택을 위한 **AI Router** 적용
+- LangChain 구조의 장점을 **Spring Boot 환경에서 재현**
+
+### 2️⃣ 잘한 점 / 강점
+
+**🧠 기술적 도전**
+- RAG, Hybrid LLM Routing, LangChain 등 고난도 AI 구조를 학습·구현
+- Rewrite → Retrieval → Context → Generate 체인을 Spring 환경에서 실행 검증
+- 비동기적으로 프롬프트를 수집해, 비용 정책에 따라 RAG 응답을 생성·저장하는 메서드 구현
+  (`RagPipelineService#produce` — 데드라인-폴링으로 프롬프트 확보 → low/high 분기 → VectorStore 저장)
+
+**📚 학습 및 협업 문화**
+- LangChain 구조 원리를 문서화 후 Discord/Notion에 공유
+- 레퍼런스 큐레이션 채널 운영 (논문, 문서, 코드 샘플)
+- 회의록·결정사항 기록으로 팀 내 러닝 속도 상승
+
+### 3️⃣ 아쉬운 점 / 비판적 분석
+
+**⚠️ 스코프 관리 실패**
+- 짧은 기간에 RAG + Router + Electron을 모두 구현하려다 MVP 완성도 부족
+- 사용자 가치보단 구조 복잡도에 초점
+
+**⚙️ 데이터 파이프라인 병목**
+- 외부 API 동기 의존으로 데이터 수집·임베딩 속도 저하
+- 컴퓨터 여러 대와 여러 개의 프로세스를 동시 실행해 어느정도 해결
+  *(전체 10%의 데이터 수집에도 기본 3시간 이상 소요)*
+
+**👥 협업·리스크 관리**
+- 역할 분담은 있었으나 통합 주기가 늦어 빌드 실패로 연결
+- 의사결정 로그 부족
+
+**📊 정량화 부족**
+- 성능을 감각적으로 평가 (“느림”)
+- p95 latency / token cost 등의 수치화 부재
+
+### 4️⃣ 핵심 교훈
+
+| 구분 | 교훈 | 설명 |
+| --- | --- | --- |
+| 기술 | “모든 걸 한 번에 구현하려 하면, 아무것도 완성되지 않는다.” | 단계별 MVP 전략의 중요성 |
+| 팀워크 | “지식 공유는 강했지만, 동기화는 약했다.” | 협업 주기 관리 필요 |
+| 설계 | “성능은 코드를 고치기보다 구조를 고쳐야 나온다.” | 병목의 근본은 구조 |
+| 성장 | “실패를 문서화하면 다음 사이클의 설계가 쉬워진다.” | Postmortem의 가치 |
+
+### ✍️ 결론
+
+이번 해커톤은 **“기술 실험으로서의 성공, 제품 완성도로서의 실패”** 였다.
+그러나 RAG, LangChain, AI Router라는 복잡한 시스템을 직접 구현하며
+**문제 해결력, 구조적 사고, 팀 학습 문화** 라는 세 가지 자산을 얻었다.
+
+다음 목표는 단순하다 — *“작동하는 MVP로 기술을 증명하는 것.”*
